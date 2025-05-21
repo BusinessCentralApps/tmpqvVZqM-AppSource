@@ -1,0 +1,216 @@
+name: ' Publish To Environment'
+
+on:
+  workflow_dispatch:
+    inputs:
+      appVersion:
+        description: App version to deploy to environment(s) (current, prerelease, draft, latest, version number or PR_<PR Id>)
+        required: false
+        default: 'current'
+      environmentName:
+        description: Environment mask to receive the new version (* for all, PROD* for all environments starting with PROD)
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+defaults:
+  run:
+    shell: powershell
+
+env:
+  ALGoOrgSettings: ${{ vars.ALGoOrgSettings }}
+  ALGoRepoSettings: ${{ vars.ALGoRepoSettings }}
+
+jobs:
+  Initialization:
+    needs: [ ]
+    runs-on: [ windows-latest ]
+    outputs:
+      environmentsMatrixJson: ${{ steps.DetermineDeploymentEnvironments.outputs.EnvironmentsMatrixJson }}
+      environmentCount: ${{ steps.DetermineDeploymentEnvironments.outputs.EnvironmentCount }}
+      deploymentEnvironmentsJson: ${{ steps.DetermineDeploymentEnvironments.outputs.DeploymentEnvironmentsJson }}
+      deviceCode: ${{ steps.Authenticate.outputs.deviceCode }}
+      telemetryScopeJson: ${{ steps.init.outputs.telemetryScopeJson }}
+    steps:
+      - name: Dump Workflow Information
+        uses: businesscentralapps/tmpqvVZqM-Actions/DumpWorkflowInfo@main
+        with:
+          shell: powershell
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Initialize the workflow
+        id: init
+        uses: businesscentralapps/tmpqvVZqM-Actions/WorkflowInitialize@main
+        with:
+          shell: powershell
+
+      - name: Read settings
+        id: ReadSettings
+        uses: businesscentralapps/tmpqvVZqM-Actions/ReadSettings@main
+        with:
+          shell: powershell
+
+      - name: Determine Deployment Environments
+        id: DetermineDeploymentEnvironments
+        uses: businesscentralapps/tmpqvVZqM-Actions/DetermineDeploymentEnvironments@main
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          shell: powershell
+          getEnvironments: ${{ github.event.inputs.environmentName }}
+          type: 'Publish'
+
+      - name: EnvName
+        id: envName
+        if: steps.DetermineDeploymentEnvironments.outputs.UnknownEnvironment == 1
+        run: |
+          $errorActionPreference = "Stop"; $ProgressPreference = "SilentlyContinue"; Set-StrictMode -Version 2.0
+          $envName = '${{ fromJson(steps.DetermineDeploymentEnvironments.outputs.environmentsMatrixJson).matrix.include[0].environment }}'.split(' ')[0]
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "envName=$envName"
+
+      - name: Determine secrets
+        id: DetermineSecrets
+        uses: businesscentralapps/tmpqvVZqM-Actions/DetermineSecrets@main
+        with:
+          shell: powershell
+          getSecrets: '${{ steps.envName.outputs.envName }}-AuthContext,${{ steps.envName.outputs.envName }}_AuthContext,AuthContext'
+
+      - name: Read secrets
+        id: ReadSecrets
+        uses: businesscentralapps/tmpqvVZqM-Actions/ReadSecrets@main
+        if: steps.DetermineDeploymentEnvironments.outputs.UnknownEnvironment == 1
+        with:
+          shell: powershell
+          gitHubSecrets: ${{ format(steps.DetermineSecrets.outputs.formatStr,toJSON(secrets[env.S0]),toJSON(secrets[env.S1]),toJSON(secrets[env.S2]),toJSON(secrets[env.S3]),toJSON(secrets[env.S4]),toJSON(secrets[env.S5]),toJSON(secrets[env.S6]),toJSON(secrets[env.S7]),toJSON(secrets[env.S8]),toJSON(secrets[env.S9]),toJSON(secrets[env.S10]),toJSON(secrets[env.S11]),toJSON(secrets[env.S12]),toJSON(secrets[env.S13]),toJSON(secrets[env.S14]),toJSON(secrets[env.S15]),toJSON(secrets[env.S16]),toJSON(secrets[env.S17]),toJSON(secrets[env.S18]),toJSON(secrets[env.S19]),toJSON(secrets[env.S20]),toJSON(secrets[env.S21]),toJSON(secrets[env.S22]),toJSON(secrets[env.S23]),toJSON(secrets[env.S24]),toJSON(secrets[env.S25]),toJSON(secrets[env.S26]),toJSON(secrets[env.S27]),toJSON(secrets[env.S28]),toJSON(secrets[env.S29]),toJSON(secrets[env.S30]),toJSON(secrets[env.S31])) }}
+
+      - name: Authenticate
+        id: Authenticate
+        if: steps.DetermineDeploymentEnvironments.outputs.UnknownEnvironment == 1
+        run: |
+          $envName = '${{ steps.envName.outputs.envName }}'
+          $secretName = ''
+          $secrets = '${{ steps.ReadSecrets.outputs.Secrets }}' | ConvertFrom-Json
+          $authContext = $null
+          "$($envName)-AuthContext", "$($envName)_AuthContext", "AuthContext" | ForEach-Object {
+            if (!($authContext)) {
+              if ($secrets."$_") {
+                Write-Host "Using $_ secret as AuthContext"
+                $authContext = $secrets."$_"
+                $secretName = $_
+              }
+            }
+          }
+          if ($authContext) {
+            Write-Host "AuthContext provided in secret $secretName!"
+            Add-Content -Encoding UTF8 -path $ENV:GITHUB_STEP_SUMMARY -value "AuthContext was provided in a secret called $secretName. Using this information for authentication."
+          }
+          else {
+            Write-Host "No AuthContext provided for $envName, initiating Device Code flow"
+            $ALGoHelperPath = "$([System.IO.Path]::GetTempFileName()).ps1"
+            $webClient = New-Object System.Net.WebClient
+            $webClient.DownloadFile('https://raw.githubusercontent.com/businesscentralapps/tmpqvVZqM-Actions/main/AL-Go-Helper.ps1', $ALGoHelperPath)
+            . $ALGoHelperPath
+            DownloadAndImportBcContainerHelper
+            $authContext = New-BcAuthContext -includeDeviceLogin -deviceLoginTimeout ([TimeSpan]::FromSeconds(0))
+            Add-Content -Encoding UTF8 -path $ENV:GITHUB_STEP_SUMMARY -value "AL-Go needs access to the Business Central Environment $('${{ steps.envName.outputs.envName }}'.Split(' ')[0]) and could not locate a secret called ${{ steps.envName.outputs.envName }}_AuthContext`n`n$($authContext.message)"
+            Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "deviceCode=$($authContext.deviceCode)"
+          }
+
+  Deploy:
+    needs: [ Initialization ]
+    if: needs.Initialization.outputs.environmentCount > 0
+    strategy: ${{ fromJson(needs.Initialization.outputs.environmentsMatrixJson) }}
+    runs-on: ${{ fromJson(matrix.os) }}
+    name: Deploy to ${{ matrix.environment }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    environment:
+      name: ${{ matrix.environment }}
+      url: ${{ steps.Deploy.outputs.environmentUrl }}
+    env:
+      deviceCode: ${{ needs.Initialization.outputs.deviceCode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: EnvName
+        id: envName
+        run: |
+          $errorActionPreference = "Stop"; $ProgressPreference = "SilentlyContinue"; Set-StrictMode -Version 2.0
+          $envName = '${{ matrix.environment }}'.split(' ')[0]
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "envName=$envName"
+
+      - name: Read settings
+        uses: businesscentralapps/tmpqvVZqM-Actions/ReadSettings@main
+        with:
+          shell: ${{ matrix.shell }}
+          get: type,powerPlatformSolutionFolder
+
+      - name: Determine secrets
+        id: DetermineSecrets
+        uses: businesscentralapps/tmpqvVZqM-Actions/DetermineSecrets@main
+        with:
+          shell: powershell
+          getSecrets: '${{ steps.envName.outputs.envName }}-AuthContext,${{ steps.envName.outputs.envName }}_AuthContext,AuthContext'
+
+      - name: Read secrets
+        id: ReadSecrets
+        uses: businesscentralapps/tmpqvVZqM-Actions/ReadSecrets@main
+        with:
+          shell: ${{ matrix.shell }}
+          gitHubSecrets: ${{ format(steps.DetermineSecrets.outputs.formatStr,toJSON(secrets[env.S0]),toJSON(secrets[env.S1]),toJSON(secrets[env.S2]),toJSON(secrets[env.S3]),toJSON(secrets[env.S4]),toJSON(secrets[env.S5]),toJSON(secrets[env.S6]),toJSON(secrets[env.S7]),toJSON(secrets[env.S8]),toJSON(secrets[env.S9]),toJSON(secrets[env.S10]),toJSON(secrets[env.S11]),toJSON(secrets[env.S12]),toJSON(secrets[env.S13]),toJSON(secrets[env.S14]),toJSON(secrets[env.S15]),toJSON(secrets[env.S16]),toJSON(secrets[env.S17]),toJSON(secrets[env.S18]),toJSON(secrets[env.S19]),toJSON(secrets[env.S20]),toJSON(secrets[env.S21]),toJSON(secrets[env.S22]),toJSON(secrets[env.S23]),toJSON(secrets[env.S24]),toJSON(secrets[env.S25]),toJSON(secrets[env.S26]),toJSON(secrets[env.S27]),toJSON(secrets[env.S28]),toJSON(secrets[env.S29]),toJSON(secrets[env.S30]),toJSON(secrets[env.S31])) }}
+
+      - name: Get Artifacts for deployment
+        uses: businesscentralapps/tmpqvVZqM-Actions/GetArtifactsForDeployment@main
+        with:
+          shell: ${{ matrix.shell }}
+          artifactsVersion: ${{ github.event.inputs.appVersion }}
+          artifactsFolder: '.artifacts'
+
+      - name: Deploy to Business Central
+        id: Deploy
+        uses: businesscentralapps/tmpqvVZqM-Actions/Deploy@main
+        env:
+          Secrets: '${{ steps.ReadSecrets.outputs.Secrets }}'
+        with:
+          shell: ${{ matrix.shell }}
+          environmentName: ${{ matrix.environment }}
+          artifactsFolder: '.artifacts'
+          type: 'Publish'
+          deploymentEnvironmentsJson: ${{ needs.Initialization.outputs.deploymentEnvironmentsJson }}
+          artifactsVersion: ${{ github.event.inputs.appVersion }}
+
+      - name: Deploy to Power Platform
+        if: env.type == 'PTE' && env.powerPlatformSolutionFolder != ''
+        uses: businesscentralapps/tmpqvVZqM-Actions/DeployPowerPlatform@main
+        env:
+          Secrets: '${{ steps.ReadSecrets.outputs.Secrets }}'
+        with:
+          shell: ${{ matrix.shell }}
+          environmentName: ${{ matrix.environment }}
+          artifactsFolder: '.artifacts'
+          deploymentEnvironmentsJson: ${{ needs.Initialization.outputs.deploymentEnvironmentsJson }}
+
+  PostProcess:
+    needs: [ Initialization, Deploy ]
+    if: always()
+    runs-on: [ windows-latest ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Finalize the workflow
+        id: PostProcess
+        uses: businesscentralapps/tmpqvVZqM-Actions/WorkflowPostProcess@main
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          shell: powershell
+          telemetryScopeJson: ${{ needs.Initialization.outputs.telemetryScopeJson }}
+          currentJobContext: ${{ toJson(job) }}

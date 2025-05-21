@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/businesscentralapps/tmpqvVZqM-Actions/main/settings.schema.json",
+  "country": "us",
+  "appSourceCopMandatoryAffixes": [
+    "<affix>"
+  ],
+  "appFolders": [],
+  "testFolders": [],
+  "bcptTestFolders": []
+}
